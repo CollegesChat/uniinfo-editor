@@ -193,12 +193,12 @@ class UniInfoCLI:
 
     def do_load(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='load', description='加载一个或多个数据文件', add_help=True
+            prog='load', description='加载一个或多个数据文件', add_help=False
         )
         parser.add_argument('files', nargs='*', help='要加载的文件（支持多个）')
-        parsed = parser.parse_args(shlex.split(arg))
+        parsed = self.safe_parse(parser, arg)
         if parsed is None or len(parsed.files) > 2:
-            return
+            parser.error('最多只能指定两个文件或自动扫描。')
 
         files = parsed.files or (
             list(auto_scan.keys()) if auto_scan else ['default.csv']
@@ -212,12 +212,12 @@ class UniInfoCLI:
     # ---- dump: 支持多个目标文件（位置参数） ----
     def do_dump(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='dump', description='导出一个或多个数据文件', add_help=True
+            prog='dump', description='导出一个或多个数据文件', add_help=False
         )
         parser.add_argument('files', nargs='*', help='要导出的文件（支持多个）')
-        parsed = parser.parse_args(shlex.split(arg))
+        parsed = self.safe_parse(parser, arg)
         if parsed is None or len(parsed.files) > 2:
-            return
+            parser.error('最多只能指定两个文件或自动扫描。')
 
         if parsed.files:
             targets = parsed.files
@@ -232,12 +232,12 @@ class UniInfoCLI:
     # ---- alias: oldname newname [issueId...] ----
     def do_alias(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='alias', description='记录学校更名', add_help=True
+            prog='alias', description='记录学校更名', add_help=False
         )
         parser.add_argument('oldname', help='原名')
         parser.add_argument('newname', help='新名')
         parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
-        parsed = parser.parse_args(arg.split())
+        parsed = self.safe_parse(parser, arg)
         if parsed is None:
             return
 
@@ -250,11 +250,11 @@ class UniInfoCLI:
     # ---- del: ID [issueId...] ----
     def do_del(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='del', description='删除记录', add_help=True
+            prog='del', description='删除记录', add_help=False
         )
         parser.add_argument('id', help='记录 ID')
         parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
-        parsed = parser.parse_args(arg.split())
+        parsed = self.safe_parse(parser, arg)
         if parsed is None:
             return
 
@@ -265,16 +265,23 @@ class UniInfoCLI:
     # ---- outdate: ID [issueId...] ----
     def do_outdate(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='outdate', description='标记记录过期', add_help=True
+            prog='outdate', description='标记记录过期', add_help=False
         )
         parser.add_argument('id', help='记录 ID')
         parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
-        parsed = parser.parse_args(arg.split())
+        parsed = self.safe_parse(parser, arg)
         if parsed is None:
             return
 
         print(f'标记过期 ID={parsed.id}, issueIds={parsed.issueIds}')
         logger.info(f'outdate {parsed.id} ({parsed.issueIds})')
+
+    @staticmethod
+    def safe_parse(parser, arg_str: str):
+        try:
+            return parser.parse_args(shlex.split(arg_str))
+        except SystemExit:
+            return None
 
 
 def run():
