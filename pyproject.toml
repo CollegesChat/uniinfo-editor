@@ -1,11 +1,9 @@
 [project]
 name = "uniinfo-editor"
-version = "1.0.0a1"
-description = "Add your description here"
+version = "1.0.0b0"
+description = "University Information Editor"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = [
-    "prompt-toolkit>=3.0.51",
-]
+dependencies = ["chardet>=5.2.0", "prompt-toolkit>=3.0.51"]
 [project.scripts]
 uniinfo_editor = "uniinfo_editor:run"

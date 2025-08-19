@@ -1,11 +1,15 @@
 import argparse
+import csv
 import itertools
 import logging
+import re
 import shlex
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Literal, NamedTuple
 
+import chardet
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 
@@ -15,7 +19,7 @@ class ColorFormatter(logging.Formatter):
         RESET = '\033[0m'
         COLORS = {
             logging.DEBUG: '\033[36m',  # 青色
-            logging.INFO: '\033[32m',  # 绿色
+            logging.INFO: '',  # 默认
             logging.WARNING: '\033[33m',  # 黄色
             logging.ERROR: '\033[31m',  # 红色
         }
@@ -29,15 +33,15 @@ def setup_logger() -> None:
     logger = logging.getLogger('uniinfo')
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
-    formatter = ColorFormatter('[%(levelname)s] %(message)s')
-
+    formatter = ColorFormatter('%(levelname)s: %(message)s')
+    plain_formatter = logging.Formatter('%(levelname)s: %(message)s')
     ch = logging.StreamHandler()
     now_str = datetime.now().strftime('%Y-%m-%d_%H-%M')
     filename = f'uniinfo - {now_str}.log'
     fh = logging.FileHandler(filename)
 
     ch.setFormatter(formatter)
-    fh.setFormatter(formatter)
+    fh.setFormatter(plain_formatter)
     logger.addHandler(ch)
     logger.addHandler(fh)
 
@@ -124,15 +128,49 @@ class CommandCompleter(Completer):
                     yield Completion(fname, start_position=-len(last_word))
 
 
+def smart_path(p: Path) -> str:
+    path = p.resolve()
+    try:
+        # 尝试相对于当前工作目录
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        # 无法相对当前目录，返回绝对路径
+        return str(path)
+
+
+type ID = str
+type IssueId = list[str] | None
+type Changed = Literal['del', 'outdate']
+
+
+class Stuffs(NamedTuple):
+    issue_ids: IssueId
+    changed: Changed
+
+
 class UniInfoCLI:
     def __init__(self):
-        self.commands = ['load', 'dump', 'alias', 'del', 'outdate', 'exit', 'help', '?']
+        self.commands = [
+            'load',
+            'dump',
+            'alias',
+            'del',
+            'outdate',
+            'exit',
+            'help',
+            'generate',
+            '?',
+        ]
         self.completer = CommandCompleter(self.commands, list(auto_scan.keys()))
         self.session = PromptSession(completer=self.completer)
         # state variables
-        self._csv: Path | None = None
-        self._txt: Path | None = None
-        self._alias: Path | None = None
+        self._csv: Path = None
+        self._alias: Path = None
+        self.data: dict[ID, dict[str, str]] = {}
+        self.alias_data: list[str] = None
+        self.modified_log: dict[ID, Stuffs] = {}
+        self.alias_log: list[tuple[tuple[str, str], IssueId]] = []
+        self.encoding: str = None
 
     def run(self):
         print(
@@ -168,23 +206,25 @@ class UniInfoCLI:
                     self.do_del(arg_str)
                 case 'outdate':
                     self.do_outdate(arg_str)
+                case 'generate':
+                    self.do_generate()
                 case 'exit':
-                    print('退出程序。')
                     break
                 case 'help' | '?' | '？':
                     self.do_help()
                 case _:
-                    print(f'未知命令: {cmd}')
+                    logger.warning(f'未知命令: {cmd}')
 
     def do_help(self):
         print('命令列表:')
         commands = [
-            ('load [$data...]', '加载数据文件（默认自动搜寻当前目录.csv和.txt）'),
-            ('dump [$newData...]', '导出数据文件（默认覆写）'),
-            ('alias $oldName $newName [$issueId...]', '学校更名（记录别名/更名）'),
-            ('del $ID [$issueId...]', '删除记录'),
-            ('outdate $ID [$issueId...]', '标记过期'),
+            ('load [data1 data2]', '加载数据文件（默认自动搜寻当前目录.csv和.txt）'),
+            ('dump [newData] [newData]', '导出数据文件（默认覆写）'),
+            ('alias oldName newName [issueId...]', '学校更名（记录别名/更名）'),
+            ('del ID [issueId...]', '删除记录'),
+            ('outdate ID [issueId...]', '标记过期'),
             ('exit', '退出程序'),
+            ('generate', '生成修改日志（Markdown格式）'),
         ]
 
         width = max(len(cmd) for cmd, _ in commands) + 2
@@ -192,96 +232,233 @@ class UniInfoCLI:
             print(f'  {cmd.ljust(width)}-- {desc}')
 
     def do_load(self, arg: str):
-        parser = argparse.ArgumentParser(
-            prog='load', description='加载一个或多个数据文件', add_help=False
-        )
-        parser.add_argument('files', nargs='*', help='要加载的文件（支持多个）')
-        parsed = self.safe_parse(parser, arg)
-        if parsed is None or len(parsed.files) > 2:
-            parser.error('最多只能指定两个文件或自动扫描。')
+        def load_csv():
+            with open(self._csv, 'rb') as f:
+                chunk = f.read(1000)
+                encoding = chardet.detect(chunk)['encoding']
+            self.encoding = encoding
+            logger.warning(f'CSV 文件加载中，编码: {encoding}')
+            with self._csv.open(newline='', encoding=encoding, errors='ignore') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    self.data[row['答题序号']] = row
+            logger.info(f'CSV 文件加载完成，数据条目数: {len(self.data)}')
 
-        files = parsed.files or (
-            list(auto_scan.keys()) if auto_scan else ['default.csv']
+        def load_alias():
+            with self._alias.open(encoding='utf-8') as f:
+                self.alias_data = f.read().splitlines()
+            logger.info(f'别名文件加载完成，数据条目数: {len(self.alias_data)}')
+
+        parser = argparse.ArgumentParser(
+            prog='load',
+            description='加载一个或多个数据文件',
+            add_help=False,
         )
-        print(f'加载文件: {files}')
-        logger.info(f'load {files}')
-        # 实际加载逻辑（示例：记录第一个被加载的文件）
-        if files:
-            self._csv = Path(files[0])
+        parser.add_argument(
+            'files', nargs='*', type=Path, help='要加载的文件（支持多个）'
+        )
+        parsed = self.safe_parse(parser, arg)
+        files: list[Path] = parsed.files
+        match files:
+            case []:
+                try:
+                    self._csv, self._alias = (
+                        auto_scan['results_desensitized.csv'],
+                        auto_scan['alias.txt'],
+                    )
+                except KeyError as e:
+                    logger.error(
+                        f'自动加载出错，请确保当前目录下存在 result_desensitized.csv 和 alias.txt {e!r}'
+                    )
+                    return
+
+            case [data, alias] if data.suffix == '.csv' and alias.suffix == '.txt':
+                self._csv, self._alias = data, alias
+
+            case [alias, data] if data.suffix == '.csv' and alias.suffix == '.txt':
+                self._csv, self._alias = data, alias
+            case _:
+                logger.error('参数错误: 需要提供 0 或 2 个文件参数')
+                return
+        logger.info(
+            f'加载文件: CSV = {smart_path(self._csv)}, Alias = {smart_path(self._alias)}'
+        )
+        load_csv()
+        load_alias()
 
     # ---- dump: 支持多个目标文件（位置参数） ----
     def do_dump(self, arg: str):
+        def dump_csv(data: Path = self._csv):
+            with open(data, 'w', newline='', encoding=self.encoding) as f:
+                writer = csv.DictWriter(
+                    f, fieldnames=self.data[next(iter(self.data))].keys()
+                )
+                writer.writeheader()  # 写表头
+                writer.writerows(list(self.data.values()))  # 写多行字典
+            logger.info(f'CSV: 已写入{len(self.data)}行数据')
+
+        def dump_alias(alias: Path = self._alias):
+            with open(alias, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(self.alias_data))
+            logger.info(f'Alias: 已写入{len(self.alias_data)}行数据')
+
         parser = argparse.ArgumentParser(
-            prog='dump', description='导出一个或多个数据文件', add_help=False
+            prog='dump',
+            description='导出一个或多个数据文件',
+            add_help=False,
         )
-        parser.add_argument('files', nargs='*', help='要导出的文件（支持多个）')
+        parser.add_argument(
+            'files', nargs='*', type=Path, help='要导出的文件（支持多个）'
+        )
         parsed = self.safe_parse(parser, arg)
-        if parsed is None or len(parsed.files) > 2:
-            parser.error('最多只能指定两个文件或自动扫描。')
-
-        if parsed.files:
-            targets = parsed.files
-        else:
-            # 若有当前加载文件则覆盖之，否则使用默认名
-            targets = [str(self._csv)] if self._csv else ['default_out.csv']
-
-        print(f'导出文件: {targets}')
-        logger.info(f'dump {targets}')
-        # 实际导出逻辑
+        if len(parsed.files) > 2:
+            logger.error('参数错误：最多只能提供 2 个文件参数')
+            return
+        files: list[Path] = parsed.files
+        match files:
+            case [data] if data.suffix == '.csv':
+                dump_csv(data)
+            case [data, alias] if data.suffix == '.csv' and alias.suffix == '.txt':
+                dump_csv(data)
+                dump_alias(alias)
+            case [alias, data] if data.suffix == '.csv' and alias.suffix == '.txt':
+                dump_csv(data)
+                dump_alias(alias)
+            case [alias] if alias.suffix == '.txt':
+                dump_alias(alias)
+            case []:
+                dump_csv()
+                dump_alias()
+            case _:
+                logger.debug(files)
+                logger.error('文件名不正确')
+                return
 
     # ---- alias: oldname newname [issueId...] ----
     def do_alias(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='alias', description='记录学校更名', add_help=False
+            prog='alias',
+            description='记录学校更名',
+            add_help=False,
         )
         parser.add_argument('oldname', help='原名')
         parser.add_argument('newname', help='新名')
-        parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
+        parser.add_argument('issueIds', nargs='*', help='可选的 issueId(s)')
         parsed = self.safe_parse(parser, arg)
-        if parsed is None:
-            return
-
-        print(
-            f"将学校 '{parsed.oldname}' 更名为 '{parsed.newname}', issueIds={parsed.issueIds}"
+        self.alias_data.append(f'{parsed.oldname}🚮{parsed.newname}')
+        self.alias_log.append(
+            ((parsed.oldname, parsed.newname), parsed.issueIds)
+            if parsed.issueIds
+            else ((parsed.oldname, parsed.newname), None)
         )
-        logger.info(f'alias {parsed.oldname} -> {parsed.newname} ({parsed.issueIds})')
-        # 实现 alias 逻辑（例如写入 CSV 或内存结构）
+        logger.info(
+            f'添加别名 {parsed.oldname} -> {parsed.newname}，issueIds={parsed.issueIds}'
+        )
 
-    # ---- del: ID [issueId...] ----
     def do_del(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='del', description='删除记录', add_help=False
+            prog='del',
+            add_help=False,
         )
         parser.add_argument('id', help='记录 ID')
-        parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
+        parser.add_argument('issueIds', nargs='*', type=str, help='可选的 issueId(s)')
         parsed = self.safe_parse(parser, arg)
-        if parsed is None:
+        if parsed.id not in self.data:
+            logger.error(f'记录 ID {parsed.id} 不存在')
             return
+        del self.data[parsed.id]
+        self.modified_log[parsed.id] = Stuffs(parsed.issueIds, 'del')
+        logger.info(f'删除回答 {parsed.id}，issueIds={parsed.issueIds}')
 
-        print(f'删除 ID={parsed.id}, issueIds={parsed.issueIds}')
-        logger.info(f'del {parsed.id} ({parsed.issueIds})')
-        # 删除逻辑
-
-    # ---- outdate: ID [issueId...] ----
     def do_outdate(self, arg: str):
         parser = argparse.ArgumentParser(
-            prog='outdate', description='标记记录过期', add_help=False
+            prog='outdate',
+            add_help=False,
         )
         parser.add_argument('id', help='记录 ID')
         parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
         parsed = self.safe_parse(parser, arg)
-        if parsed is None:
+        if parsed.id not in self.data:
+            logger.error(f'记录 ID {parsed.id} 不存在')
             return
-
-        print(f'标记过期 ID={parsed.id}, issueIds={parsed.issueIds}')
-        logger.info(f'outdate {parsed.id} ({parsed.issueIds})')
+        for i in range(5, 30):
+            self.data[parsed.id]['Q' + str(i)] = (
+                '[过时]：' + self.data[parsed.id]['Q' + str(i)]
+            )
+        self.modified_log[parsed.id] = Stuffs(parsed.issueIds, 'outdate')
+        print(f'标记过期 {parsed.id}, issueIds={parsed.issueIds}')
 
     @staticmethod
-    def safe_parse(parser, arg_str: str):
-        try:
-            return parser.parse_args(shlex.split(arg_str))
-        except SystemExit:
-            return None
+    def safe_parse(parser: argparse.ArgumentParser, arg_str: str):
+        return parser.parse_args(shlex.split(arg_str))
+
+    def do_generate(self):
+        DELETED = '删除了A{id}|，由于{issue_ids}的反馈'
+        OUTDATED = '将A{id}标记为过期|，由于{issue_ids}的反馈'
+        ADDED = '添加了新的别名，{old_name} -> {new_name}|，由于{issue_ids}的反馈'
+        TEMPLATE = """# 修改日志
+以下是此PR的修改记录：
+## 删除记录
+{deleted}
+## 标记过时
+{outdated}
+## 添加别名
+{added}
+"""
+        deleted = []
+        outdated = []
+        added = []
+        for id, stuff in self.modified_log.items():
+            if stuff.changed == 'del':
+                if not stuff.issue_ids:
+                    deleted.append(
+                        re.sub(r'\|.*', '', DELETED.format(id=id, issue_ids=''))
+                    )
+                    continue
+                deleted.append(
+                    DELETED.format(
+                        id=id, issue_ids=', '.join(f'#{i}' for i in stuff.issue_ids)
+                    ).replace('|', '')
+                )
+            elif stuff.changed == 'outdate':
+                if not stuff.issue_ids:
+                    outdated.append(
+                        re.sub(r'\|.*', '', OUTDATED.format(id=id, issue_ids=''))
+                    )
+                    continue
+                outdated.append(
+                    OUTDATED.format(
+                        id=id, issue_ids=', '.join(f'#{i}' for i in stuff.issue_ids)
+                    ).replace('|', '')
+                )
+        logger.debug(self.alias_log)
+        for name, issue_ids in self.alias_log:
+            old_name, new_name = name
+            if not issue_ids:
+                added.append(
+                    re.sub(
+                        r'\|.*',
+                        '',
+                        ADDED.format(
+                            old_name=old_name, new_name=new_name, issue_ids=''
+                        ),
+                    )
+                )
+                continue
+            added.append(
+                ADDED.format(
+                    old_name=old_name,
+                    new_name=new_name,
+                    issue_ids=', '.join(f'#{i}' for i in issue_ids),
+                ).replace('|', '')
+            )
+        logger.info(
+            TEMPLATE.format(
+                deleted='\n'.join(deleted) if deleted else '无',
+                outdated='\n'.join(outdated) if outdated else '无',
+                added='\n'.join(added) if added else '无',
+            )
+        )
 
 
 def run():
