@@ -12,38 +12,34 @@ from typing import Literal, NamedTuple
 import chardet
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.table import Table
 
 
-class ColorFormatter(logging.Formatter):
-    def format(self, record):
-        RESET = '\033[0m'
-        COLORS = {
-            logging.DEBUG: '\033[36m',  # 青色
-            logging.INFO: '',  # 默认
-            logging.WARNING: '\033[33m',  # 黄色
-            logging.ERROR: '\033[31m',  # 红色
-        }
-        color = COLORS.get(record.levelno, RESET)
-        message = super().format(record)
-        return f'{color}{message}{RESET}'
-
-
-def setup_logger() -> None:
-    global logger
+def setup_logger() -> logging.Logger:
     logger = logging.getLogger('uniinfo')
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
-    formatter = ColorFormatter('%(levelname)s: %(message)s')
-    plain_formatter = logging.Formatter('%(levelname)s: %(message)s')
-    ch = logging.StreamHandler()
+
+    # === 终端输出，用 RichHandler ===
+    ch = RichHandler(
+        rich_tracebacks=True, markup=True, show_time=False, show_path=False
+    )
+    ch.setLevel(logging.DEBUG)  # 控制台显示级别
+    ch.setFormatter(logging.Formatter('%(message)s'))  # Rich 要用 message
+
+    # === 文件日志输出，用普通 Formatter ===
     now_str = datetime.now().strftime('%Y-%m-%d_%H-%M')
     filename = f'uniinfo - {now_str}.log'
-    fh = logging.FileHandler(filename)
+    fh = logging.FileHandler(filename, encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter('%(levelname)s:  %(message)s'))
 
-    ch.setFormatter(formatter)
-    fh.setFormatter(plain_formatter)
+    # === 绑定 handler ===
     logger.addHandler(ch)
     logger.addHandler(fh)
+    return logger
 
 
 def scan_folders(*folders: str) -> dict[str, Path]:
@@ -76,7 +72,7 @@ class CommandCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         # 保留原始 text（不要 strip，需检测末尾空格）
-        text = document.text_before_cursor
+        text = document.text_before_cursor.lower()
 
         # 1) 空输入或仅空白 -> 列出所有命令
         if text == '' or text.isspace():
@@ -99,7 +95,7 @@ class CommandCompleter(Completer):
         if ' ' not in text:
             prefix = text
             for cmd in self.commands:
-                if cmd.startswith(prefix):
+                if cmd.lower().startswith(prefix):
                     yield Completion(cmd, start_position=-len(prefix))
             return
 
@@ -159,6 +155,7 @@ class UniInfoCLI:
             'exit',
             'help',
             'generate',
+            'view',
             '?',
         ]
         self.completer = CommandCompleter(self.commands, list(auto_scan.keys()))
@@ -191,29 +188,36 @@ class UniInfoCLI:
                 break
             if not line.strip():
                 continue
+            lines = line.splitlines()
+            for line in lines:
+                line = line.strip()
+                i = line.find(' ')
+                if i == -1:
+                    cmd, arg_str = line, ''
+                else:
+                    cmd, arg_str = line[:i], line[i + 1 :].strip()
 
-            cmd, *args = line.split()
-            arg_str = ' '.join(args)
-
-            match cmd:
-                case 'load':
-                    self.do_load(arg_str)
-                case 'dump':
-                    self.do_dump(arg_str)
-                case 'alias':
-                    self.do_alias(arg_str)
-                case 'del':
-                    self.do_del(arg_str)
-                case 'outdate':
-                    self.do_outdate(arg_str)
-                case 'generate':
-                    self.do_generate()
-                case 'exit':
-                    break
-                case 'help' | '?' | '？':
-                    self.do_help()
-                case _:
-                    logger.warning(f'未知命令: {cmd}')
+                match cmd.lower():
+                    case 'load':
+                        self.do_load(arg_str)
+                    case 'dump':
+                        self.do_dump(arg_str)
+                    case 'alias':
+                        self.do_alias(arg_str)
+                    case 'del':
+                        self.do_del(arg_str)
+                    case 'outdate':
+                        self.do_outdate(arg_str)
+                    case 'generate':
+                        self.do_generate()
+                    case 'exit':
+                        return
+                    case 'view':
+                        self.do_view(arg_str)
+                    case 'help' | '?' | '？':
+                        self.do_help()
+                    case _:
+                        logger.warning(f'未知命令: {cmd}')
 
     def do_help(self):
         print('命令列表:')
@@ -223,6 +227,7 @@ class UniInfoCLI:
             ('alias oldName newName [issueId...]', '学校更名（记录别名/更名）'),
             ('del ID [issueId...]', '删除记录'),
             ('outdate ID [issueId...]', '标记过期'),
+            ('view ID [ID ...]', '查看记录'),
             ('exit', '退出程序'),
             ('generate', '生成修改日志（Markdown格式）'),
         ]
@@ -345,6 +350,8 @@ class UniInfoCLI:
         parser.add_argument('newname', help='新名')
         parser.add_argument('issueIds', nargs='*', help='可选的 issueId(s)')
         parsed = self.safe_parse(parser, arg)
+        if not parsed:
+            return
         self.alias_data.append(f'{parsed.oldname}🚮{parsed.newname}')
         self.alias_log.append(
             ((parsed.oldname, parsed.newname), parsed.issueIds)
@@ -363,12 +370,52 @@ class UniInfoCLI:
         parser.add_argument('id', help='记录 ID')
         parser.add_argument('issueIds', nargs='*', type=str, help='可选的 issueId(s)')
         parsed = self.safe_parse(parser, arg)
+        if not parsed:
+            return
         if parsed.id not in self.data:
             logger.error(f'记录 ID {parsed.id} 不存在')
             return
         del self.data[parsed.id]
         self.modified_log[parsed.id] = Stuffs(parsed.issueIds, 'del')
         logger.info(f'删除回答 {parsed.id}，issueIds={parsed.issueIds}')
+
+    def do_view(self, arg: str):
+        def vertical_table(fields: list[str], rows: list[list[str]]):
+            table = Table(show_header=False, box=None)
+
+            # 第一列是字段名
+            table.add_column('字段', style='bold')
+
+            # 添加每一行作为列
+            for i, _ in enumerate(rows):
+                table.add_column(f'{i}', style='dim')
+
+            # 每一字段对应每列的值
+            for idx, field in enumerate(fields):
+                values = [row[idx] if idx < len(row) else '' for row in rows]
+                table.add_row(field, *values)
+
+            Console().print(table)
+
+        parser = argparse.ArgumentParser(
+            prog='view',
+            add_help=False,
+        )
+        parser.add_argument('ids', nargs='+', help='记录 ID(s)')
+        parsed = self.safe_parse(parser, arg)
+
+        if not parsed:
+            return
+        logger.warning('你可能需要手动调节终端字体大小')
+        cols = ['ID'] + [f'{i}' for i in range(5, 30)]
+        rows = []
+        for id in parsed.ids:
+            if id not in self.data:
+                logger.error(f'记录 ID {id} 不存在')
+                return
+
+            rows.append([id, *[self.data[id].get(f'Q{i}', '') for i in range(5, 30)]])
+        vertical_table(cols, rows)
 
     def do_outdate(self, arg: str):
         parser = argparse.ArgumentParser(
@@ -378,6 +425,8 @@ class UniInfoCLI:
         parser.add_argument('id', help='记录 ID')
         parser.add_argument('issueIds', nargs='*', type=int, help='可选的 issueId(s)')
         parsed = self.safe_parse(parser, arg)
+        if not parsed:
+            return
         if parsed.id not in self.data:
             logger.error(f'记录 ID {parsed.id} 不存在')
             return
@@ -386,11 +435,14 @@ class UniInfoCLI:
                 '[过时]：' + self.data[parsed.id]['Q' + str(i)]
             )
         self.modified_log[parsed.id] = Stuffs(parsed.issueIds, 'outdate')
-        print(f'标记过期 {parsed.id}, issueIds={parsed.issueIds}')
+        logger.info(f'标记过期 {parsed.id}, issueIds={parsed.issueIds}')
 
     @staticmethod
     def safe_parse(parser: argparse.ArgumentParser, arg_str: str):
-        return parser.parse_args(shlex.split(arg_str))
+        try:
+            return parser.parse_args(shlex.split(arg_str))
+        except SystemExit:
+            pass
 
     def do_generate(self):
         DELETED = '删除了A{id}|，由于{issue_ids}的反馈'
@@ -417,7 +469,7 @@ class UniInfoCLI:
                     continue
                 deleted.append(
                     DELETED.format(
-                        id=id, issue_ids=', '.join(f'#{i}' for i in stuff.issue_ids)
+                        id=id, issue_ids=','.join(f' #{i} ' for i in stuff.issue_ids)
                     ).replace('|', '')
                 )
             elif stuff.changed == 'outdate':
@@ -428,7 +480,7 @@ class UniInfoCLI:
                     continue
                 outdated.append(
                     OUTDATED.format(
-                        id=id, issue_ids=', '.join(f'#{i}' for i in stuff.issue_ids)
+                        id=id, issue_ids=','.join(f' #{i} ' for i in stuff.issue_ids)
                     ).replace('|', '')
                 )
         logger.debug(self.alias_log)
@@ -449,7 +501,7 @@ class UniInfoCLI:
                 ADDED.format(
                     old_name=old_name,
                     new_name=new_name,
-                    issue_ids=', '.join(f'#{i}' for i in issue_ids),
+                    issue_ids=','.join(f' #{i} ' for i in issue_ids),
                 ).replace('|', '')
             )
         logger.info(
@@ -462,12 +514,11 @@ class UniInfoCLI:
 
 
 def run():
-    global auto_scan
-    setup_logger()
-    auto_scan = scan_folders()
     cli = UniInfoCLI()
     cli.run()
 
 
+logger = setup_logger()
+auto_scan = scan_folders()
 if __name__ == '__main__':
     run()

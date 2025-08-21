@@ -3,7 +3,7 @@ university-information/
 __pycache__/
 *.py[codz]
 *$py.class
-
+.history
 # C extensions
 *.so
 
