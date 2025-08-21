@@ -13,7 +13,7 @@ UniInfo Editor 是一个命令行工具，用于管理和编辑大学问卷信�
 | `outdate ID [issueId...]`            | 标记记录过期                                           |
 | `exit`                               | 退出程序                                               |
 | `generate`                           | 生成修改日志（Markdown 格式）                          |
-| `view [ID ...]`                      | 查看记录                                               |
+| `view ID [ID ...]`                   | 查看记录                                               |
 
 ## 安装
 
