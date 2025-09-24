@@ -137,6 +137,16 @@ def smart_path(p: Path) -> str:
 type ID = str
 type IssueId = list[str] | None
 type Changed = Literal['del', 'outdate']
+commands = [
+    ('load [data1 data2]', '加载数据文件（默认自动搜寻当前目录.csv和.txt）'),
+    ('dump [newData] [newData]', '导出数据文件（默认覆写）'),
+    ('alias oldName newName [issueId...]', '学校更名（记录别名/更名）'),
+    ('del ID [issueId...]', '删除记录'),
+    ('outdate ID [issueId...]', '标记过期'),
+    ('view ID [ID ...]', '查看记录'),
+    ('exit', '退出程序'),
+    ('generate', '生成修改日志（Markdown格式）'),
+]
 
 
 class Stuffs(NamedTuple):
@@ -147,15 +157,7 @@ class Stuffs(NamedTuple):
 class UniInfoCLI:
     def __init__(self):
         self.commands = [
-            'load',
-            'dump',
-            'alias',
-            'del',
-            'outdate',
-            'exit',
-            'help',
-            'generate',
-            'view',
+            *[cmd.split()[0] for cmd, _ in commands],
             '?',
         ]
         self.completer = CommandCompleter(self.commands, list(auto_scan.keys()))
@@ -221,16 +223,6 @@ class UniInfoCLI:
 
     def do_help(self):
         print('命令列表:')
-        commands = [
-            ('load [data1 data2]', '加载数据文件（默认自动搜寻当前目录.csv和.txt）'),
-            ('dump [newData] [newData]', '导出数据文件（默认覆写）'),
-            ('alias oldName newName [issueId...]', '学校更名（记录别名/更名）'),
-            ('del ID [issueId...]', '删除记录'),
-            ('outdate ID [issueId...]', '标记过期'),
-            ('view ID [ID ...]', '查看记录'),
-            ('exit', '退出程序'),
-            ('generate', '生成修改日志（Markdown格式）'),
-        ]
 
         width = max(len(cmd) for cmd, _ in commands) + 2
         for cmd, desc in commands:

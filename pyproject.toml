@@ -1,9 +1,12 @@
 [project]
 name = "uniinfo-editor"
-version = "1.0.0rc"
+version = "1.0.0rc1"
 description = "University Information Editor"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = ["chardet>=5.2.0", "prompt-toolkit>=3.0.51", "rich>=14.1.0"]
 [project.scripts]
 uniinfo_editor = "uniinfo_editor:run"
+
+[tool.uv.workspace]
+members = ["university-information/questionnaires/dist"]
