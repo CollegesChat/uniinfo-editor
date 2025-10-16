@@ -2,11 +2,11 @@ import argparse
 import csv
 import itertools
 import logging
-import re
 import shlex
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from string import Template
 from typing import Literal, NamedTuple
 
 import chardet
@@ -154,7 +154,7 @@ class Stuffs(NamedTuple):
     changed: Changed
 
 
-class UniInfoCLI:
+class UniInfoTUI:
     def __init__(self):
         self.commands = [
             *[cmd.split()[0] for cmd, _ in commands],
@@ -437,67 +437,54 @@ class UniInfoCLI:
             pass
 
     def do_generate(self):
-        DELETED = '删除了A{id}|，由于{issue_ids}的反馈'
-        OUTDATED = '将A{id}标记为过期|，由于{issue_ids}的反馈'
-        ADDED = '添加了新的别名，{old_name} -> {new_name}|，由于{issue_ids}的反馈'
-        TEMPLATE = """# 修改日志
+        # 基本条目模板（不包含 "由于...的反馈" 部分）
+        DELETED = Template('删除了A${id}${issue_part}')
+        OUTDATED = Template('将A${id}标记为过期${issue_part}')
+        ADDED = Template('添加了新的别名，${old_name} -> ${new_name}${issue_part}')
+
+        # issue 部分的模板，按需加入
+        ISSUE_PART = Template('，由于${issue_ids}的反馈')
+
+        # 最终日志模板
+        TEMPLATE = Template("""# 修改日志
 以下是此PR的修改记录：
 ## 删除记录
-{deleted}
+${deleted}
 ## 标记过时
-{outdated}
+${outdated}
 ## 添加别名
-{added}
-"""
+${added}
+""")
+
+        def make_issue_part(issue_ids):
+            """根据 issue_ids 列表返回要插入的字符串（空或 '，由于...的反馈'）"""
+            if not issue_ids:
+                return ''
+            issue_ids_str = ','.join(f' #{i} ' for i in issue_ids)
+            return ISSUE_PART.substitute(issue_ids=issue_ids_str)
+
         deleted = []
         outdated = []
         added = []
+
         for id, stuff in self.modified_log.items():
+            issue_part = make_issue_part(stuff.issue_ids)
             if stuff.changed == 'del':
-                if not stuff.issue_ids:
-                    deleted.append(
-                        re.sub(r'\|.*', '', DELETED.format(id=id, issue_ids=''))
-                    )
-                    continue
-                deleted.append(
-                    DELETED.format(
-                        id=id, issue_ids=','.join(f' #{i} ' for i in stuff.issue_ids)
-                    ).replace('|', '')
-                )
+                deleted.append(DELETED.substitute(id=id, issue_part=issue_part))
             elif stuff.changed == 'outdate':
-                if not stuff.issue_ids:
-                    outdated.append(
-                        re.sub(r'\|.*', '', OUTDATED.format(id=id, issue_ids=''))
-                    )
-                    continue
-                outdated.append(
-                    OUTDATED.format(
-                        id=id, issue_ids=','.join(f' #{i} ' for i in stuff.issue_ids)
-                    ).replace('|', '')
-                )
+                outdated.append(OUTDATED.substitute(id=id, issue_part=issue_part))
+
         logger.debug(self.alias_log)
-        for name, issue_ids in self.alias_log:
-            old_name, new_name = name
-            if not issue_ids:
-                added.append(
-                    re.sub(
-                        r'\|.*',
-                        '',
-                        ADDED.format(
-                            old_name=old_name, new_name=new_name, issue_ids=''
-                        ),
-                    )
-                )
-                continue
+        for (old_name, new_name), issue_ids in self.alias_log:
+            issue_part = make_issue_part(issue_ids)
             added.append(
-                ADDED.format(
-                    old_name=old_name,
-                    new_name=new_name,
-                    issue_ids=','.join(f' #{i} ' for i in issue_ids),
-                ).replace('|', '')
+                ADDED.substitute(
+                    old_name=old_name, new_name=new_name, issue_part=issue_part
+                )
             )
+
         logger.info(
-            TEMPLATE.format(
+            TEMPLATE.substitute(
                 deleted='\n'.join(deleted) if deleted else '无',
                 outdated='\n'.join(outdated) if outdated else '无',
                 added='\n'.join(added) if added else '无',
@@ -506,7 +493,7 @@ class UniInfoCLI:
 
 
 def run():
-    cli = UniInfoCLI()
+    cli = UniInfoTUI()
     cli.run()
 
 
