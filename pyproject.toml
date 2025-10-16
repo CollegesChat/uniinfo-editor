@@ -1,6 +1,6 @@
 [project]
 name = "uniinfo-editor"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "University Information Editor"
 readme = "README.md"
 requires-python = ">=3.13"
