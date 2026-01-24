@@ -1,6 +1,6 @@
 [project]
 name = "uniinfo-editor"
-version = "1.0.0rc2"
+version = "1.0.0"
 description = "University Information Editor"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -10,3 +10,6 @@ uniinfo_editor = "uniinfo_editor:run"
 
 [tool.uv.workspace]
 members = ["university-information/questionnaires/dist"]
+exclude = [
+  "university-information",
+]

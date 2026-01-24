@@ -31,7 +31,9 @@ def setup_logger() -> logging.Logger:
 
     # === 文件日志输出，用普通 Formatter ===
     now_str = datetime.now().strftime('%Y-%m-%d_%H-%M')
-    filename = f'uniinfo - {now_str}.log'
+    if not Path('logs').exists():
+        Path('logs').mkdir()
+    filename = f'./logs/uniinfo - {now_str}.log'
     fh = logging.FileHandler(filename, encoding='utf-8')
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter('%(levelname)s:  %(message)s'))
@@ -63,7 +65,7 @@ def scan_folders(*folders: str) -> dict[str, Path]:
 
 
 class CommandCompleter(Completer):
-    def __init__(self, commands: list[str], file_names: list[str] = None):
+    def __init__(self, commands: list[str], file_names: list[str] | None = None):
         self.commands = commands
         self.file_names = file_names or []
 
@@ -232,7 +234,7 @@ class UniInfoTUI:
         def load_csv():
             with open(self._csv, 'rb') as f:
                 chunk = f.read(1000)
-                encoding = chardet.detect(chunk)['encoding']
+                encoding = chardet.detect(chunk)['encoding'] or 'utf-8'
             self.encoding = encoding
             logger.warning(f'CSV 文件加载中，编码: {encoding}')
             with self._csv.open(newline='', encoding=encoding, errors='ignore') as f:
