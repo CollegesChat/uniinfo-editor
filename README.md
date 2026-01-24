@@ -1,6 +1,6 @@
 # uniinfo-editor
 
-UniInfo Editor 是一个命令行工具，用于管理和编辑大学问卷信息，支持加载 CSV/文本数据、记录学校别名、删除或标记记录过期，并生成修改日志。
+UniInfo Editor 是一个文本用户界面工具，用于管理和编辑大学问卷信息，支持加载 CSV/文本数据、记录学校别名、删除或标记记录过期，并生成修改日志。
 
 ## 功能概览
 
@@ -25,7 +25,7 @@ pip install git+https://github.com/kaixinol/uniinfo-editor.git
 
 ## 运行
 
-安装完成后，通过以下命令启动 CLI：
+安装完成后，通过以下命令启动 TUI：
 
 ```bash
 uniinfo_editor
