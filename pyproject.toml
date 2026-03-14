@@ -13,3 +13,10 @@ members = ["university-information/questionnaires/dist"]
 exclude = [
   "university-information",
 ]
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.ty.environment]
+python = "./.venv"
+root = ['src']
+[tool.ty.rules]
+invalid-assignment = "ignore"
