@@ -213,7 +213,7 @@ class UniInfoTUI:
                     case 'outdate':
                         self.do_outdate(arg_str)
                     case 'generate':
-                        self.do_generate()
+                        self.do_generate(arg_str)
                     case 'exit':
                         return
                     case 'view':
@@ -438,11 +438,18 @@ class UniInfoTUI:
         except SystemExit:
             pass
 
-    def do_generate(self):
+    def do_generate(self, arg: str):
+        parser = argparse.ArgumentParser(
+            prog='generate',
+            add_help=False,
+        )
+        parser.add_argument('--git', action='store_true', help='生成 Fixes 行')
+        parsed = self.safe_parse(parser, arg)
+
         # 基本条目模板（不包含 "由于...的反馈" 部分）
         DELETED = Template('删除了A${id}${issue_part}')
         OUTDATED = Template('将A${id}标记为过期${issue_part}')
-        ADDED = Template('添加了新的别名，${old_name} -> ${new_name}${issue_part}')
+        ALIASED = Template('添加了新的别名，${old_name} -> ${new_name}${issue_part}')
 
         # issue 部分的模板，按需加入
         ISSUE_PART = Template('，由于${issue_ids}的反馈')
@@ -455,10 +462,10 @@ ${deleted}
 ## 标记过时
 ${outdated}
 ## 添加别名
-${added}
-""")
+${aliased}
+${fixes}""")
 
-        def make_issue_part(issue_ids):
+        def _make_issue_part(issue_ids):
             """根据 issue_ids 列表返回要插入的字符串（空或 '，由于...的反馈'）"""
             if not issue_ids:
                 return ''
@@ -467,10 +474,10 @@ ${added}
 
         deleted = []
         outdated = []
-        added = []
+        aliased = []
 
         for id, stuff in self.modified_log.items():
-            issue_part = make_issue_part(stuff.issue_ids)
+            issue_part = _make_issue_part(stuff.issue_ids)
             if stuff.changed == 'del':
                 deleted.append(DELETED.substitute(id=id, issue_part=issue_part))
             elif stuff.changed == 'outdate':
@@ -478,9 +485,9 @@ ${added}
 
         logger.debug(self.alias_log)
         for (old_name, new_name), issue_ids in self.alias_log:
-            issue_part = make_issue_part(issue_ids)
-            added.append(
-                ADDED.substitute(
+            issue_part = _make_issue_part(issue_ids)
+            aliased.append(
+                ALIASED.substitute(
                     old_name=old_name, new_name=new_name, issue_part=issue_part
                 )
             )
@@ -489,9 +496,24 @@ ${added}
             TEMPLATE.substitute(
                 deleted='\n'.join(deleted) if deleted else '无',
                 outdated='\n'.join(outdated) if outdated else '无',
-                added='\n'.join(added) if added else '无',
+                aliased='\n'.join(aliased) if aliased else '无',
+                fixes=self._make_fixes_line() if parsed.git else '',
             )
         )
+
+    def _make_fixes_line(self) -> str:
+        """从所有操作记录中收集 issue_ids，生成 Fixes 行"""
+        issue_ids = set()
+        for stuff in self.modified_log.values():
+            if stuff.issue_ids:
+                issue_ids.update(stuff.issue_ids)
+        for _, issue_ids_list in self.alias_log:
+            if issue_ids_list:
+                issue_ids.update(issue_ids_list)
+        if not issue_ids:
+            return ''
+        sorted_ids = sorted(issue_ids, key=lambda x: int(x))
+        return 'Fixes ' + ', '.join(f'#{i}' for i in sorted_ids)
 
 
 def run():
