@@ -1,22 +1,43 @@
 [project]
 name = "uniinfo-editor"
-version = "1.1.0"
+version = "1.2.0"
 description = "University Information Editor"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["chardet>=5.2.0", "prompt-toolkit>=3.0.51", "rich>=14.1.0"]
+dependencies = [
+    "chardet>=5.2.0",
+    "prompt-toolkit>=3.0.51",
+    "rich>=14.1.0",
+]
+
 [project.scripts]
 uniinfo_editor = "uniinfo_editor:run"
+
+# 使用 PEP 735 标准的依赖分组（uv 完美支持）
+[dependency-groups]
+plugin = [
+    "data-checker @ git+https://github.com/CollegesChat/data-checker",
+]
 
 [tool.uv.workspace]
 members = ["university-information/questionnaires/dist"]
 exclude = [
   "university-information",
 ]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
 [tool.ty.environment]
 python = "./.venv"
 root = ['src']
+
 [tool.ty.rules]
 invalid-assignment = "ignore"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
