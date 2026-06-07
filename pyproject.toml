@@ -13,8 +13,7 @@ dependencies = [
 [project.scripts]
 uniinfo_editor = "uniinfo_editor:run"
 
-# 使用 PEP 735 标准的依赖分组（uv 完美支持）
-[dependency-groups]
+[project.optional-dependencies]
 plugin = [
     "data-checker @ git+https://github.com/CollegesChat/data-checker",
 ]
