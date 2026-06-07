@@ -1,4 +1,4 @@
-import argparse
+import argparse  # 能跑就别动，留着吧（其实最好是用click-repl
 import csv
 import itertools
 import logging
@@ -17,7 +17,23 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-PLUGIN_COMMANDS: dict[str, tuple[Callable, str]] = {}
+PLUGIN_COMMANDS: dict[str, tuple[Callable, argparse.ArgumentParser, str]] = {}
+
+
+def register_plugin(parser: argparse.ArgumentParser):
+    """第三方插件用于注册自己和 ArgumentParser 的装饰器"""
+    if not isinstance(parser, argparse.ArgumentParser):
+        raise TypeError('插件必须提供合法的 argparse.ArgumentParser 实例！')
+
+    def decorator(func: Callable):
+        cmd_name = parser.prog.lower()
+        desc = parser.description or func.__doc__ or '[第三方插件] 未提供描述'
+
+        # 写入主程序路由表
+        PLUGIN_COMMANDS[cmd_name] = (func, parser, desc)
+        return func
+
+    return decorator
 
 
 def setup_logger() -> logging.Logger:
@@ -68,65 +84,115 @@ def scan_folders(*folders: str) -> dict[str, Path]:
 
 
 class CommandCompleter(Completer):
-    def __init__(self, commands: list[str], file_names: list[str] | None = None):
+    def __init__(
+        self,
+        commands: list[str],
+        file_names: list[str] | None = None,
+        native_parsers: dict = None,
+    ):
         self.commands = commands
         self.file_names = file_names or []
+        self.native_parsers = native_parsers or {}  # 存下原生解析器
 
     def update_files(self, files: list[str]):
         self.file_names = files
 
+    def _traverse_argparse(
+        self,
+        parser: argparse.ArgumentParser,
+        established_args: list[str],
+        last_word: str,
+    ) -> list[str]:
+        """[自动化核心] 递归扒开 argparse 的 subparsers 和 options"""
+        current_parser = parser
+
+        # 1. 根据用户已经敲完的参数，顺着子解析器树一路摸下去
+        for arg in established_args:
+            if current_parser._subparsers:
+                for action in current_parser._subparsers._actions:
+                    if (
+                        isinstance(action, argparse._SubParsersAction)
+                        and arg in action.choices
+                    ):
+                        current_parser = action.choices[arg]
+                        break
+
+        candidates = []
+        # 2. 收集当前层级所有合法的子命令 (例如 joke, school, typo)
+        if current_parser._subparsers:
+            for action in current_parser._subparsers._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    candidates.extend(action.choices.keys())
+
+        # 3. 收集当前层级所有合法的参数选项 (例如 -t, --threshold)
+        for action in current_parser._actions:
+            if action.option_strings:
+                candidates.extend(action.option_strings)
+
+        # 4. 过滤出匹配当前正在输入的词
+        return [c for c in candidates if c.startswith(last_word)]
+
     def get_completions(self, document, complete_event):
-        # 保留原始 text（不要 strip，需检测末尾空格）
         text = document.text_before_cursor.lower()
 
-        # 1) 空输入或仅空白 -> 列出所有命令
+        # 1) 空输入或仅空白 -> 🔥 用 set 去重并排序
         if text == '' or text.isspace():
-            for cmd in self.commands:
-                # start_position=0 表示从当前位置插入完整命令
+            all_root_cmds = sorted(
+                list(set(self.commands) | set(PLUGIN_COMMANDS.keys()))
+            )
+            for cmd in all_root_cmds:
                 yield Completion(cmd, start_position=0)
             return
 
-        # 检查是否以空格结尾（用于判断用户是否已开始新参数）
         ends_with_space = text.endswith(' ')
 
-        # 尝试 shell 风格切分（处理引号）
         try:
             parts = shlex.split(text)
         except ValueError:
-            # unmatched quotes 等解析错误时，不返回补全
             return
 
-        # 2) 仍在输入第一个单词（命令）
+        # 2) 仍在输入第一个单词 -> 🔥 同样用 set 去重并排序
         if ' ' not in text:
             prefix = text
-            for cmd in self.commands:
+            all_root_cmds = sorted(
+                list(set(self.commands) | set(PLUGIN_COMMANDS.keys()))
+            )
+            for cmd in all_root_cmds:
                 if cmd.lower().startswith(prefix):
                     yield Completion(cmd, start_position=-len(prefix))
             return
-
-        # 3) 已输入命令且进入参数补全阶段
         cmd = parts[0] if parts else ''
-        # 已输入的参数（文件名）列表
         used_files = parts[1:] if len(parts) > 1 else []
 
-        # 如果已经输入 2 个或以上参数（达到上限），不再提供文件补全
-        if len(used_files) >= 2:
-            return
+        # 3) 已输入命令且进入参数补全阶段
 
-        # 确定当前正在输入的词（若以空格结尾则表示正在新建参数，last_word 为空）
-        last_word = ''
-        if not ends_with_space:
-            # WORD=True 允许把连字符等也作为词的一部分，按需可改为 False
-            last_word = document.get_word_before_cursor(WORD=True) or ''
-
-        # 只有 load/dump 支持文件名补全
+        # 保留你原本完美的 load/dump 文件补全逻辑
         if cmd in ('load', 'dump'):
+            if len(used_files) >= 2:
+                return
+            last_word = ''
+            if not ends_with_space:
+                last_word = document.get_word_before_cursor(WORD=True) or ''
             for fname in self.file_names:
                 if fname in used_files:
-                    continue  # 排除已输入的文件
-                # 如果没有部分前缀（last_word == ''），就显示所有剩余文件
+                    continue
                 if last_word == '' or fname.startswith(last_word):
                     yield Completion(fname, start_position=-len(last_word))
+            return
+
+        parser = None
+        if cmd in PLUGIN_COMMANDS:
+            _, parser, _ = PLUGIN_COMMANDS[cmd]
+        elif cmd in self.native_parsers:
+            parser = self.native_parsers[cmd]
+
+        if parser:
+            established_args = parts[1:] if ends_with_space else parts[1:-1]
+            last_word = '' if ends_with_space else (document.get_word_before_cursor(WORD=True) or '')
+
+            suggestions = self._traverse_argparse(parser, established_args, last_word)
+            for s in suggestions:
+                yield Completion(s, start_position=-len(last_word))
 
 
 def smart_path(p: Path) -> str:
@@ -161,9 +227,17 @@ class Stuffs(NamedTuple):
 
 class UniInfoTUI:
     def __init__(self):
+        self.native_parsers = {
+            'generate': argparse.ArgumentParser(prog='generate', add_help=False)
+        }
+        self.native_parsers['generate'].add_argument(
+            '--git', action='store_true', help='生成 Fixes 行'
+        )
         base_cmd_names = [cmd.split()[0] for cmd, _ in commands]
         self.commands = base_cmd_names + list(PLUGIN_COMMANDS.keys()) + ['?']
-        self.completer = CommandCompleter(self.commands, list(auto_scan.keys()))
+        self.completer = CommandCompleter(
+            self.commands, list(auto_scan.keys()), native_parsers=self.native_parsers
+        )
         self.session = PromptSession(completer=self.completer)
         # state variables
         self._csv: Path = None
@@ -223,8 +297,15 @@ class UniInfoTUI:
                         self.do_help()
                     case _ as custom_cmd:
                         if custom_cmd in PLUGIN_COMMANDS:
-                            func, _ = PLUGIN_COMMANDS[custom_cmd]
-                            func(self, arg_str)
+                            func, parser, _ = PLUGIN_COMMANDS[custom_cmd]
+
+                            # 主程序替插件代劳解析
+                            parsed_args = self.safe_parse(parser, arg_str)
+                            if parsed_args is None:
+                                continue  # 解析失败（例如敲错参数），直接拦截，开启下一轮 TUI 循环
+
+                            # 传入解析好的 Namespace
+                            func(self, parsed_args)
                         else:
                             logger.warning(f'未知命令: {cmd}')
 
@@ -233,7 +314,8 @@ class UniInfoTUI:
 
         all_commands = list(commands)
 
-        for cmd_name, (_, desc) in PLUGIN_COMMANDS.items():
+        # 顺应新的字典结构取出描述
+        for cmd_name, (_, _, desc) in PLUGIN_COMMANDS.items():
             all_commands.append((cmd_name, desc))
 
         width = max(len(cmd) for cmd, _ in all_commands) + 2
@@ -538,18 +620,22 @@ auto_scan = scan_folders()
 
 def load_installed_plugins():
     """扫描 Python 环境中安装的插件库并注册"""
-    # 假设我们定义插件的 entry_points 组名为 'uniinfo.plugins'
     discovered_plugins = metadata.entry_points(group='uniinfo.plugins')
 
     for ep in discovered_plugins:
         try:
+            # 加载插件入口函数（这会触发插件代码被执行，从而让装饰器生效）
             plugin_func = ep.load()
-
-            desc = plugin_func.__doc__ or '[第三方插件] 未提供描述'
             cmd_name = ep.name.lower()
 
-            PLUGIN_COMMANDS[cmd_name] = (plugin_func, desc)
-            logger.info(f'成功加载插件库指令: {cmd_name}')
+            # 🚨 核心约束：检查装饰器有没有把它塞进主程序的全局路由表里
+            if cmd_name not in PLUGIN_COMMANDS:
+                logger.error(
+                    f'❌ 加载插件失败: 插件 {ep.name} 内部未调用 @register_plugin 绑定 Parser！'
+                )
+                continue
+
+            logger.info(f'✨ 成功激活插件库指令: [bold green]{cmd_name}[/bold green]')
         except Exception as e:
             logger.error(f'加载插件库 {ep.name} 失败: {e!r}')
 
