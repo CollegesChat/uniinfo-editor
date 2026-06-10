@@ -1,12 +1,13 @@
 [project]
 name = "uniinfo-editor"
-version = "1.3.0"
+version = "2.0.0"
 description = "University Information Editor"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "chardet>=5.2.0",
     #data-checker,
+    "click-repl>=0.3.0",
     "prompt-toolkit>=3.0.51",
     "rich>=14.1.0",
 ]
