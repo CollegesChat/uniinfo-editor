@@ -18,9 +18,8 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
-from viztracer import log_sparse
 from wenjuanxing_parser import (
-    load_questions_from_yaml,  # FIXME: 加载csv太慢， VizTracer debug
+    load_questions_from_yaml,
 )
 
 # 从同级目录的 models.py 中导入解析器实体（增加了 ChosenOption）
@@ -120,7 +119,7 @@ def scan_folders(*folders: str) -> dict[str, Path]:
 class UniInfoTUI:
     completer: ClickCompleter
     session: PromptSession
-    csv_: Path | None
+    csv: Path | None
     df: pd.DataFrame | None  # 统一的 SSOT 数据底座
     data: dict[ID, QuestionnaireResponse]  # 强类型实体映射
     mode: Literal['v1', 'v2']  # 当前问卷版本激活模式
@@ -135,7 +134,7 @@ class UniInfoTUI:
         self.session = PromptSession(completer=self.completer)
 
         # 内部状态初始化
-        self.csv_ = None
+        self.csv = None
         self.df = None
         self.data = {}
         self.mode = 'v1'  # 默认运行在 v1 模式
@@ -148,8 +147,8 @@ class UniInfoTUI:
         self.schemas = {
             'v1': load_questions_from_yaml(parse_yaml(
                 Path('/mnt/data/Project/questionnaire/v1.yaml').read_text())  # type: ignore
-            ),  # FIXME
-            'v2': {},
+            ),
+            'v2': load_questions_from_yaml(parse_yaml(Path('/mnt/data/Project/questionnaire/v2.yaml').read_text())),  # type: ignore
         }
 
     def run(self) -> None:
@@ -183,12 +182,29 @@ class UniInfoTUI:
             except Exception as e:
                 logger.exception(f'系统内部错误: {e}')
 
-    def _reparse_data(self) -> None:
-        """核心辅助：根据当前激活的 mode 和底层 DataFrame 刷新业务解析层对象"""  # FIXME
-        if self.df is None:
-            self.data = {}
-            return
+    def get_parsed_response(self, idx: Any) -> Any | None:
+        """View 层辅助函数：根据 DataFrame 行索引按需（懒加载）解析单条答卷数据
 
+        Args:
+            idx: DataFrame 的行索引 (例如循环中的 idx 或特定的答题序号绑定的 index)
+        Returns:
+            解析后的单条 QuestionnaireResponse 实体对象，失败或不存在则返回 None
+        """
+        # 1. 初始化类级别的缓存字典（如果尚未建立）
+        if not hasattr(self, '_response_cache'):
+            self._response_cache = {}
+
+        # 2. 命中缓存直接返回，避免在 TUI 界面来回切换或滚动时重复计算
+        if idx in self._response_cache:
+            return self._response_cache[idx]
+
+        if self.df is None or idx not in self.df.index:
+            return None
+
+        # 3. 提取当前模式的 Schema 题目映射
+        current_questions_map = self.schemas.get(self.mode, {})
+
+        # --- 保持你原有的局部提取器逻辑不变 ---
         class LegacyBasicData(BasicData):
             def __repr__(self) -> str:
                 return (
@@ -197,9 +213,9 @@ class UniInfoTUI:
                     f'num={self.num!r})'
                 )
 
-        def meta_extractor(df: pd.DataFrame, idx: Any) -> BasicData | None:
-            row = df.loc[idx]
-            return LegacyBasicData(  # 4. 移除了括号末尾的硬编码逗号，确保返回纯粹的实体对象，通过 ty check 校验
+        def meta_extractor(df: pd.DataFrame, index: Any) -> BasicData | None:
+            row = df.loc[index]
+            return LegacyBasicData(
                 answer_date=datetime.fromisoformat(str(row['开始时间'])),
                 num=int(row['答题序号']),
                 time_used=timedelta(0),
@@ -209,42 +225,51 @@ class UniInfoTUI:
             )
 
         def qnum_extractor(col_name: str) -> int | None:
-            # 匹配 Q1 或 Q1:
             match = re.match(r'^[qQ](\d+)', col_name)
             return int(match.group(1)) if match else None
-
-        current_questions_map = self.schemas.get(self.mode, {})
-        if not current_questions_map:
-            logger.warning(
-                f'当前模式 [{self.mode}] 的 Schema 题目映射为空，弱校验展示可能处于不完整状态！'
-            )
+        # --------------------------------------
 
         try:
-            # 借助 wenjuanxing-parser 模型解析矩阵
-            q_data = QuestionnaireData.from_dataframe(
-                self.df, current_questions_map, meta_extractor, qnum_extractor
+            # 核心黑魔法：利用双重括号 [[idx]] 切出仅包含这单个样本行的 DataFrame
+            # 这样既能保持原有 DataFrame 的二维矩阵结构，完美兼容 from_dataframe，
+            # 又把 Pydantic 校验的压力降到了最低（只校验 1 行），耗时接近 0ms
+            single_row_df = self.df.loc[[idx]]
+            parsed_data = QuestionnaireData.from_dataframe(
+                single_row_df,
+                current_questions_map,
+                *((meta_extractor, qnum_extractor) if self.mode == 'v1' else ()),
             )
-            self.data = {}
-            # 根据原始 DataFrame 顺序和行索引反向对齐打散到字典
-            for idx, response_obj in zip(self.df.index, q_data.data, strict=True):
-                qid = str(self.df.loc[idx, '答题序号'])
-                self.data[qid] = response_obj
+
+            # from_dataframe 返回的是一个包含了 data 列表的对象，单行切片时里面最多只有 1 个元素
+            res_obj = parsed_data.data[0] if parsed_data.data else None
+
+            # 写入缓存并返回
+            self._response_cache[idx] = res_obj
+            return res_obj
+
         except Exception as e:
-            logger.error(f'刷新问卷星语义层解析失败: {e!r}')
+            logger.error(f'View 层解析单行语义数据失败 (行索引: {idx}): {e!r}')
+            return None
 
     def _get_school_column(self) -> str | None:
         """根据当前的模式硬编码题号，动态提取 DataFrame 中匹配的列名"""
         if self.df is None:
             return None
+
         target_qnum = SCHOOL_QNUMS.get(self.mode)
         if target_qnum is None:
             return None
 
-        for col in self.df.columns:
-            match = re.match(r'^(\d+)[、\.]', str(col))
-            if match and int(match.group(1)) == target_qnum:
-                return str(col)
-        return None
+        # 优化后的正则：匹配数字开头，后面可以跟 顿号/点/逗号/空格 甚至直接跟文字
+        # \s* 允许题号和分隔符、文字之间有任意空格
+        # [、\.,，\s]? 表示分隔符是可选的
+        pattern = re.compile(r'^(\d+)[、\.,，\s]?')
+
+        def _is_target_column(col: Any) -> bool:
+            match = pattern.match(str(col))
+            return match is not None and int(match.group(1)) == target_qnum
+
+        return next((str(col) for col in self.df.columns if _is_target_column(col)), None)
 
     def _make_fixes_line(self) -> str:
         issue_ids: set[str] = set()
@@ -302,20 +327,20 @@ def load(tui: UniInfoTUI, file: Path | None) -> None:
     """加载原始问卷数据文件（仅支持 CSV）"""
     if file is None:
         if 'results_desensitized.csv' in auto_scan:
-            tui.csv_ = auto_scan['results_desensitized.csv']
+            tui.csv = auto_scan['results_desensitized.csv']
         else:
             logger.error('自动加载出错，请确保当前目录下存在 results_desensitized.csv')
             return
     elif file.suffix == '.csv':
-        tui.csv_ = file
+        tui.csv = file
     else:
         logger.error('参数错误: 只能加载扩展名为 .csv 的问卷数据文件')
         return
 
-    logger.info(f'加载文件: CSV = {smart_path(tui.csv_)}')
+    logger.info(f'加载文件: CSV = {smart_path(tui.csv)}')
 
     # 嗅探字符编码
-    with open(tui.csv_, 'rb') as f:
+    with open(tui.csv, 'rb') as f:
         chunk = f.read(1000)
         encoding = chardet.detect(chunk)['encoding'] or 'utf-8'
     tui.encoding = encoding
@@ -323,8 +348,7 @@ def load(tui: UniInfoTUI, file: Path | None) -> None:
 
     try:
         # 使用 Pandas 接管底层矩阵，并利用内置机制做初步解析层组装
-        tui.df = pd.read_csv(tui.csv_, encoding=encoding)
-        tui._reparse_data()
+        tui.df = pd.read_csv(tui.csv, encoding=encoding)
         logger.info(f'CSV 文件加载完成，基础数据条目数: {len(tui.df)}')
     except Exception as e:
         logger.error(f'CSV 加载失败: {e!r}')
@@ -341,7 +365,7 @@ def load(tui: UniInfoTUI, file: Path | None) -> None:
 @click.pass_obj
 def dump(tui: UniInfoTUI, file: Path | None) -> None:
     """导出清理后的结果到 CSV 文件（默认覆写加载文件）"""
-    target_csv = file or tui.csv_
+    target_csv = file or tui.csv
     if target_csv is None:
         logger.error('存储路径丢失：未加载任何有效文件且未显式指定目标位置。')
         return
@@ -373,7 +397,6 @@ def mode(tui: UniInfoTUI, version: Literal['v1', 'v2']) -> None:
     )
     if tui.df is not None:
         logger.info('正在基于新版本的 Schema 题目映射规则刷新缓存数据解析层...')
-        tui._reparse_data()
 
 
 @cli_group.command()
@@ -410,7 +433,6 @@ def alias(
             f'🎉 成功将列 [{school_col}] 中所有 ({match_count} 处) "{oldname}" 批量变更为 "{newname}"'
         )
         # 联动刷新弱校验语义模型层
-        tui._reparse_data()
 
     # 记录修改链供 generate 指令使用
     tui.alias_log.append(((oldname, newname), list(issue_ids) if issue_ids else None))
@@ -443,12 +465,25 @@ def delete_record(tui: UniInfoTUI, id: str, issue_ids: tuple[str, ...]) -> None:
 @click.pass_obj
 def view(tui: UniInfoTUI, _id: tuple[str, ...]) -> None:
     """查看一条或多条数据记录（集成动态弱校验规则状态）"""
+    if tui.df is None:
+        logger.error('未加载任何 CSV 数据，请先执行 load 加载数据！')
+        return
+
+    # 避免在循环里频繁调用 tui.df[tui.df[...] == rid] 导致扫表卡顿
+    qid_to_idx = {str(v): k for k, v in tui.df['答题序号' if tui.mode == 'v1' else "序号"].items()}
+
     for rid in _id:
-        if rid not in tui.data:
-            logger.error(f'记录 ID {rid} 在内存缓存中缺席。')
+        # 1. 根据用户输入的 rid 转换得到真实的 Pandas 行索引
+        idx = qid_to_idx.get(rid)
+        if idx is None:
+            logger.error(f'记录 ID {rid} 在 CSV 数据中未找到（答题序号不存在）。')
             continue
 
-        resp: QuestionnaireResponse = tui.data[rid]
+        # 2. 触发懒加载函数，动态解析单行语义层数据
+        resp = tui.get_parsed_response(idx)
+        if resp is None:
+            logger.error(f'记录 ID {rid} 语义层懒加载解析失败。')
+            continue
 
         table = Table(
             title=f'📋 答卷详情展示面板 (ID: {rid}) [模式: {tui.mode}]',
@@ -493,9 +528,7 @@ def view(tui: UniInfoTUI, _id: tuple[str, ...]) -> None:
             elif isinstance(ans.value, list):
                 parts = []
                 for item in ans.value:
-                    if isinstance(
-                        item, ChosenOption
-                    ):  # 🚀 使用 isinstance 替换 hasattr，精准收窄类型
+                    if isinstance(item, ChosenOption):
                         txt = item.text
                         if item.additional_text:
                             txt += f' ({item.additional_text})'
@@ -503,7 +536,7 @@ def view(tui: UniInfoTUI, _id: tuple[str, ...]) -> None:
                     else:
                         parts.append(str(item))
                 val_str = ' ┋ '.join(parts)
-            elif isinstance(ans.value, ChosenOption):  # 🚀 使用 isinstance 替换 hasattr
+            elif isinstance(ans.value, ChosenOption):
                 val_str = ans.value.text
                 if ans.value.additional_text:
                     val_str += f' ({ans.value.additional_text})'
