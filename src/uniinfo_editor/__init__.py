@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import chardet
 import click
-import pandas as pd
+import polars as pl
 from click import Group
 from click_repl import ClickCompleter
 from prompt_toolkit import PromptSession
@@ -114,7 +114,7 @@ class UniInfoTUI:
     completer: ClickCompleter
     session: PromptSession
     csv: Path | None
-    df: pd.DataFrame | None  # 统一的 SSOT 数据底座
+    df: pl.DataFrame | None  # 统一的 SSOT 数据底座
     data: dict[ID, QuestionnaireResponse]  # 强类型实体映射
     mode: Literal['v1', 'v2']  # 当前问卷版本激活模式
     schemas: dict[str, dict[int, Any]]  # 集中管理各版本的 questions_map
@@ -179,14 +179,21 @@ class UniInfoTUI:
                 logger.exception(f'系统内部错误: {e}')
 
     def get_parsed_response(self, idx: Any) -> Any | None:
-        """View 层辅助函数：根据 DataFrame 行索引按需（懒加载）解析单条答卷数据"""
+        """View 层辅助函数：根据 Polars DataFrame 行索引按需（懒加载）解析单条答卷数据"""
         if not hasattr(self, '_response_cache'):
             self._response_cache = {}
 
         if idx in self._response_cache:
             return self._response_cache[idx]
 
-        if self.df is None or idx not in self.df.index:
+        if self.df is None:
+            return None
+
+        # Polars 使用 row 方法按物理行索性取值（或通过 filter 检索）
+        try:
+            # 配合 TUI 语义，这里利用 row(idx) 配合 columns 组装单行临时映射字典
+            row_dict = dict(zip(self.df.columns, self.df.row(idx), strict=True))
+        except Exception:
             return None
 
         current_questions_map = self.schemas.get(self.mode, {})
@@ -199,11 +206,11 @@ class UniInfoTUI:
                     f'num={self.num!r})'
                 )
 
-        def meta_extractor(df: pd.DataFrame, index: Any) -> BasicData | None:
-            row = df.loc[index]
+        def meta_extractor(df: Any, index: Any) -> BasicData | None:
+            # 在由 from_dataframe 传递进来的单行清洗流中，row_dict 已经拿到了底层字典数据
             return LegacyBasicData(
-                answer_date=datetime.fromisoformat(str(row['开始时间'])),
-                num=int(row['答题序号']),
+                answer_date=datetime.fromisoformat(str(row_dict['开始时间'])),
+                num=int(row_dict['答题序号']),
                 time_used=timedelta(0),
                 source='null',
                 source_detail='null',
@@ -215,7 +222,8 @@ class UniInfoTUI:
             return int(match.group(1)) if match else None
 
         try:
-            single_row_df = self.df.loc[[idx]]
+            # 切出当前单行构建只含单条记录的 Polars DataFrame
+            single_row_df = self.df.slice(idx, 1)
             parsed_data = QuestionnaireData.from_dataframe(
                 single_row_df,
                 current_questions_map,
@@ -324,7 +332,7 @@ def load(tui: UniInfoTUI, file: Path | None) -> None:
     logger.warning(f'CSV 文件加载中，编码: {encoding}')
 
     try:
-        tui.df = pd.read_csv(tui.csv, encoding=encoding)
+        tui.df = pl.read_csv(tui.csv, encoding=encoding)
         logger.info(f'CSV 文件加载完成，基础数据条目数: {len(tui.df)}')
     except Exception as e:
         logger.error(f'CSV 加载失败: {e!r}')
@@ -353,7 +361,7 @@ def dump(tui: UniInfoTUI, file: Path | None) -> None:
         return
 
     try:
-        tui.df.to_csv(target_csv, index=False, encoding=tui.encoding or 'utf-8')
+        tui.df.write_csv(target_csv)
         logger.info(
             f'CSV: 已成功写入 {len(tui.df)} 行完整数据至 -> {smart_path(target_csv)}'
         )
@@ -394,15 +402,23 @@ def alias(
         )
         return
 
-    mask = tui.df[school_col].astype(str).str.strip() == oldname.strip()
-    match_count = mask.sum()
+    # 1. 构造一个用于对比的蒙版条件
+    condition = tui.df[school_col].cast(pl.String).str.strip_chars() == oldname.strip()
+    match_count = condition.sum()
 
     if match_count == 0:
         logger.warning(
             f'未在列 [{school_col}] 中抓取到学校名为 "{oldname}" 的作答记录。'
         )
     else:
-        tui.df.loc[mask, school_col] = newname
+        # 2. Polars 不支持原位 .loc 赋值，通过 with_columns 配合 pl.when 进行替换
+        tui.df = tui.df.with_columns(
+            pl
+            .when(condition)
+            .then(pl.lit(newname))
+            .otherwise(pl.col(school_col))
+            .alias(school_col)
+        )
         logger.info(
             f'🎉 成功将列 [{school_col}] 中所有 ({match_count} 处) "{oldname}" 批量变更为 "{newname}"'
         )
@@ -421,12 +437,13 @@ def delete_record(tui: UniInfoTUI, id: str, issue_ids: tuple[str, ...]) -> None:
         return
 
     if tui.df is not None:
-        tui.df = tui.df[tui.df['答题序号'].astype(str) != str(id)].reset_index(
-            drop=True
-        )
+        import polars as pl
+
+        # 使用 filter 过滤掉指定物理 ID 所在的行
+        id_col = '答题序号' if tui.mode == 'v1' else '序号'
+        tui.df = tui.df.filter(pl.col(id_col).cast(pl.String) != str(id))
 
     del tui.data[id]
-    # 🚀 简化：去掉了 Stuffs 类实例化，直接存储扁平的 IssueId 类型
     tui.modified_log[id] = list(issue_ids) if issue_ids else None
     logger.info(f'物理删除回答记录 {id}，已记录修补依赖 issueIds={list(issue_ids)}')
 
@@ -434,14 +451,17 @@ def delete_record(tui: UniInfoTUI, id: str, issue_ids: tuple[str, ...]) -> None:
 @cli_group.command()
 @click.argument('_id', nargs=-1, required=True, metavar='ID')
 @click.pass_obj
-def view(tui: UniInfoTUI, _id: tuple[str, ...]) -> None:
+def view(tui: UniInfoTUI, _id: tuple[str, ...]) -> None:  # FIXME: 查看v2问卷会读取v1数据
     """查看一条或多条数据记录（集成动态弱校验规则状态）"""
     if tui.df is None:
         logger.error('未加载任何 CSV 数据，请先执行 load 加载数据！')
         return
 
+    # 构建从 “答题序号/序号” 映射到 “物理行号(idx)” 的查找字典
+    id_col_name = '答题序号' if tui.mode == 'v1' else '序号'
+    # 通过将该列转为字符串后，与行号序列结合做 map
     qid_to_idx = {
-        str(v): k for k, v in tui.df['答题序号' if tui.mode == 'v1' else '序号'].items()
+        str(val): idx for idx, val in enumerate(tui.df[id_col_name].to_list())
     }
 
     for rid in _id:
