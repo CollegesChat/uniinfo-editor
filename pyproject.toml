@@ -9,7 +9,9 @@ dependencies = [
     #data-checker,
     "click-repl>=0.3.0",
     "prompt-toolkit>=3.0.51",
+    "py-yaml12>=0.1.0",
     "rich>=14.1.0",
+    "wenjuanxing-parser>=0.1.0b4",
 ]
 
 [project.scripts]
@@ -29,9 +31,6 @@ exclude = [
 # [tool.uv.sources]
 # data-checker = { path = "../data-checker" }
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [tool.ty.environment]
 python = "./.venv"
 root = ['src']
@@ -43,5 +42,8 @@ invalid-assignment = "ignore"
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[dependency-groups]
+dev = [
+    "viztracer>=1.1.1",
+]
+
