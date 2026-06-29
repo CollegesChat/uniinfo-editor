@@ -11,7 +11,7 @@ dependencies = [
     "prompt-toolkit>=3.0.51",
     "py-yaml12>=0.1.0",
     "rich>=14.1.0",
-    "wenjuanxing-parser>=0.2.0b1",
+    "wenjuanxing-parser>=0.3.0a1",
 ]
 
 [project.scripts]

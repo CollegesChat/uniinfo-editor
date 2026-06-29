@@ -1,14 +1,6 @@
 version = 1
 revision = 3
 requires-python = ">=3.13"
-resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version < '3.14' and sys_platform == 'win32'",
-    "python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-]
 
 [[package]]
 name = "annotated-types"
@@ -81,12 +73,7 @@ wheels = [
 [[package]]
 name = "data-checker"
 version = "0.1.3"
-source = { directory = "../data-checker" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [{ name = "uniinfo-editor", git = "https://github.com/CollegesChat/uniinfo-editor" }]
+source = { git = "https://github.com/CollegesChat/data-checker#29f5cc9d7d8ec5849303dd26b0059ef3f36f8e0b" }
 
 [[package]]
 name = "fastexcel"
@@ -323,7 +310,6 @@ source = { editable = "." }
 dependencies = [
     { name = "chardet" },
     { name = "click-repl" },
-    { name = "data-checker" },
     { name = "prompt-toolkit" },
     { name = "py-yaml12" },
     { name = "rich" },
@@ -344,12 +330,11 @@ dev = [
 requires-dist = [
     { name = "chardet", specifier = ">=5.2.0" },
     { name = "click-repl", specifier = ">=0.3.0" },
-    { name = "data-checker", directory = "../data-checker" },
-    { name = "data-checker", marker = "extra == 'plugin'", directory = "../data-checker" },
+    { name = "data-checker", marker = "extra == 'plugin'", git = "https://github.com/CollegesChat/data-checker" },
     { name = "prompt-toolkit", specifier = ">=3.0.51" },
     { name = "py-yaml12", specifier = ">=0.1.0" },
     { name = "rich", specifier = ">=14.1.0" },
-    { name = "wenjuanxing-parser", specifier = ">=0.2.0b1" },
+    { name = "wenjuanxing-parser", specifier = ">=0.3.0a0" },
 ]
 provides-extras = ["plugin"]
 
@@ -402,14 +387,14 @@ wheels = [
 
 [[package]]
 name = "wenjuanxing-parser"
-version = "0.2.0b1"
+version = "0.3.0a0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastexcel" },
     { name = "polars" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/be/1b/a928dbd9145b133240dfc4c768305fef1ac1e6f7963e5b710e1face1f60b/wenjuanxing_parser-0.2.0b1.tar.gz", hash = "sha256:0f12d151bdc9e817e4137a1f98af5519fcaac0e738a846641cf149bdab5c8a16", size = 62785, upload-time = "2026-06-25T08:42:34.228Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/d5/30062c72f307b8f3296de5ca273feeb334019411aa83303c562f04ae68b7/wenjuanxing_parser-0.3.0a0.tar.gz", hash = "sha256:e0cbf4c4a8e7e4ea0513bff7b03d85132008ef37f5e1d265627f9399f4fd6d1a", size = 65277, upload-time = "2026-06-29T05:26:00.131Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/8c/83c2ae097fadef31352d04c891653fb236e737f83f516f88c6930cdb70e6/wenjuanxing_parser-0.2.0b1-py3-none-any.whl", hash = "sha256:c2888b100cbcc9411e14be6606676b5f89b45508d75e54b92d249acbe311683d", size = 24234, upload-time = "2026-06-25T08:42:33.184Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/2d/c2e02db6fef78b8d111c604e7647c9feae0c44dcb9775278e8a3fc163647/wenjuanxing_parser-0.3.0a0-py3-none-any.whl", hash = "sha256:ed84ddd90250aed4537574dc6f291338914a40c02202f709c5ef4cc50ef4a800", size = 29168, upload-time = "2026-06-29T05:25:59.282Z" },
 ]
