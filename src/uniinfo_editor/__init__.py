@@ -68,6 +68,27 @@ def register_plugin(cmd: click.Command) -> click.Command:
     return cmd
 
 
+class _LegacyBasicData(BasicData):
+    def __repr__(self) -> str:
+        return (
+            f'{self.__class__.__name__}('
+            f'answer_date={self.answer_date!r}, '
+            f'num={self.num!r})'
+        )
+
+
+def _v1_meta_extractor(df: Any, idx: Any) -> BasicData | None:
+    row = df.row(idx, named=True)
+    return _LegacyBasicData(
+        answer_date=datetime.fromisoformat(str(row['开始时间'])),
+        num=int(row['答题序号']),
+        time_used=timedelta(0),
+        source='null',
+        source_detail='null',
+        ip=IP(address='127.0.0.1', location='null'),
+    )
+
+
 def setup_logger() -> logging.Logger:
     logger = logging.getLogger('uniinfo')
     logger.setLevel(logging.DEBUG)
@@ -178,65 +199,46 @@ class UniInfoTUI:
             except Exception as e:
                 logger.exception(f'系统内部错误: {e}')
 
-    def get_parsed_response(self, idx: Any) -> Any | None:
-        """View 层辅助函数：根据 Polars DataFrame 行索引按需（懒加载）解析单条答卷数据"""
-        if not hasattr(self, '_response_cache'):
-            self._response_cache = {}
-
-        if idx in self._response_cache:
-            return self._response_cache[idx]
-
+    def _get_parsed_data(self) -> QuestionnaireData | None:
+        """按需构建并缓存 QuestionnaireData 实例（df 或 mode 变更时自动重建）"""
         if self.df is None:
             return None
 
-        # Polars 使用 row 方法按物理行索性取值（或通过 filter 检索）
-        try:
-            # 配合 TUI 语义，这里利用 row(idx) 配合 columns 组装单行临时映射字典
-            row_dict = dict(zip(self.df.columns, self.df.row(idx), strict=True))
-        except Exception:
+        cached = getattr(self, '_parsed_data', None)
+        cache_df = getattr(self, '_parsed_df_id', None)
+        cache_mode = getattr(self, '_parsed_mode', None)
+
+        if cached is not None and cache_df is id(self.df) and cache_mode == self.mode:
+            return cached
+
+        questions_map = self.schemas.get(self.mode, {})
+        self._parsed_data = QuestionnaireData.from_dataframe(
+            self.df,
+            questions_map,
+            meta_extractor=_v1_meta_extractor if self.mode == 'v1' else None,
+        )
+        self._parsed_df_id = id(self.df)
+        self._parsed_mode = self.mode
+        self._response_cache = {}
+        return self._parsed_data
+
+    def get_parsed_response(self, idx: Any) -> Any | None:
+        """View 层辅助函数：根据 Polars DataFrame 行索引按需（懒加载）解析单条答卷数据"""
+        if idx in getattr(self, '_response_cache', {}):
+            return self._response_cache[idx]
+
+        parsed = self._get_parsed_data()
+        if parsed is None:
             return None
 
-        current_questions_map = self.schemas.get(self.mode, {})
-
-        class LegacyBasicData(BasicData):
-            def __repr__(self) -> str:
-                return (
-                    f'{self.__class__.__name__}('
-                    f'answer_date={self.answer_date!r}, '
-                    f'num={self.num!r})'
-                )
-
-        def meta_extractor(df: Any, index: Any) -> BasicData | None:
-            # 在由 from_dataframe 传递进来的单行清洗流中，row_dict 已经拿到了底层字典数据
-            return LegacyBasicData(
-                answer_date=datetime.fromisoformat(str(row_dict['开始时间'])),
-                num=int(row_dict['答题序号']),
-                time_used=timedelta(0),
-                source='null',
-                source_detail='null',
-                ip=IP(address='127.0.0.1', location='null'),
-            )
-
-        def qnum_extractor(col_name: str) -> int | None:
-            match = re.match(r'^[qQ](\d+)', col_name)
-            return int(match.group(1)) if match else None
-
         try:
-            # 切出当前单行构建只含单条记录的 Polars DataFrame
-            single_row_df = self.df.slice(idx, 1)
-            parsed_data = QuestionnaireData.from_dataframe(
-                single_row_df,
-                current_questions_map,
-                *((meta_extractor, qnum_extractor) if self.mode == 'v1' else ()),
-            )
-
-            res_obj = parsed_data.data[0] if parsed_data.data else None
-            self._response_cache[idx] = res_obj
-            return res_obj
-
-        except Exception as e:
+            res_obj = parsed[idx]
+        except (IndexError, KeyError) as e:
             logger.error(f'View 层解析单行语义数据失败 (行索引: {idx}): {e!r}')
             return None
+
+        self._response_cache[idx] = res_obj
+        return res_obj
 
     def _get_school_column(self) -> str | None:
         if self.df is None:
